@@ -375,6 +375,73 @@ class Braker4Test(unittest.TestCase):
                 self.assertEqual(1, runner.call_count)
         self.assertFalse((cache / self.args.lineage / "lengths_cutoff").exists())
 
+    def test_container_pull_is_atomic_and_reuses_snakemake_image(self):
+        config = configparser.ConfigParser()
+        config.read(self.args.template)
+        uri = config["containers"]["braker3_image"]
+        path = self.args.container_cache / (hashlib.md5(uri.encode()).hexdigest() + ".simg")
+
+        def pull(command, **kwargs):
+            self.assertEqual(["apptainer", "pull"], command[:2])
+            self.assertEqual(uri, command[-1])
+            self.assertFalse(path.exists())
+            Path(command[2]).write_bytes(b"image")
+
+        with mock.patch.object(braker4_compleasm.subprocess, "run", side_effect=pull) as runner:
+            first = braker4_compleasm.container_command(self.args, self.root)
+            self.assertEqual(first, braker4_compleasm.container_command(self.args, self.root))
+            self.assertEqual(1, runner.call_count)
+        self.assertEqual(str(path), first[-2])
+        self.assertEqual(b"image", path.read_bytes())
+
+    def test_runner_starts_child_once_after_cache_preparation(self):
+        run, _, expected, _ = run_braker4.prepare_run(self.args)
+        self.outputs(run)
+        argv = ["run_braker4"]
+        for name in ("source", "source_manifest", "template", "genome", "proteins",
+                     "busco_downloads", "container_cache", "output_dir",
+                     "sample", "lineage", "threads", "mem_mb"):
+            argv.extend(["--" + name.replace("_", "-"), str(getattr(self.args, name))])
+        argv.extend(["--rnaseq-r1", *map(str, self.args.rnaseq_r1),
+                     "--rnaseq-r2", *map(str, self.args.rnaseq_r2)])
+        with mock.patch.object(sys, "argv", argv):
+            with mock.patch.object(run_braker4, "prepare_cache") as prepared:
+                def execute(command, **kwargs):
+                    prepared.assert_called_once()
+                    self.assertEqual(expected, command)
+                with mock.patch.object(run_braker4.subprocess, "run", side_effect=execute) as child:
+                    run_braker4.main()
+                    child.assert_called_once()
+        self.assertTrue((self.args.output_dir / "run.json").is_file())
+
+    def test_seeded_compleasm_cache_is_copied_and_checked_without_download(self):
+        source = self.args.busco_downloads / "lineages" / self.args.lineage
+        seed = self.root / "seed"
+        self.args.compleasm_cache_seed = seed
+        reference = ">first\nMK\n>second\nMQ\n"
+        for directory in (source, seed / self.args.lineage):
+            (directory / "hmms").mkdir(parents=True)
+            (directory / "hmms/test.hmm").write_text("profile")
+            (directory / "scores_cutoff").write_text("cutoff")
+        with gzip.open(source / "refseq_db.faa.gz", "wt") as handle:
+            handle.write(reference)
+        (seed / self.args.lineage / "refseq_db.faa.gz").write_bytes((source / "refseq_db.faa.gz").read_bytes())
+        for name in ("file_versions.tsv", "placement_files", self.args.lineage, "eukaryota_odb12"):
+            (seed / (name + ".done")).touch()
+        local_score = seed / self.args.lineage / "scores_cutoff"
+        local_score.write_text("wrong")
+        with mock.patch.object(braker4_compleasm, "urlopen") as network:
+            with self.assertRaisesRegex(ValueError, "scores_cutoff"):
+                braker4_compleasm.download_cache(self.args, self.root, ["apptainer"])
+            self.assertFalse(braker4_compleasm.private_cache(self.root).exists())
+            local_score.write_text("cutoff")
+            cache = braker4_compleasm.download_cache(self.args, self.root, ["apptainer"])
+            network.assert_not_called()
+        probe = self.root / "probe.faa"
+        braker4_compleasm.write_probe(cache / self.args.lineage / "refseq_db.faa.gz", probe)
+        self.assertEqual(">first\nMK\n", probe.read_text())
+        self.assertTrue(seed.is_dir())
+
     def test_placeholder_compleasm_summary_is_not_accepted(self):
         path = self.root / "summary.txt"
         path.write_text("Compleasm assessment failed\n")

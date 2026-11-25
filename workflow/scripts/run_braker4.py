@@ -361,6 +361,8 @@ def main():
     parser.add_argument("--rnaseq-r2", nargs="*", type=Path, default=[])
     parser.add_argument("--threads", type=int, required=True)
     parser.add_argument("--mem-mb", type=int, required=True)
+    parser.add_argument("--compleasm-cache-seed", type=Path,
+                        help="Reuse a completed Compleasm download after validating the lineage.")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true")
     parser.add_argument(
@@ -393,7 +395,6 @@ def main():
                         staged = Path(directory) / "results"
                         shutil.copytree(collected, staged)
                         staged.rename(backup)
-            subprocess.run([*command, "--container-download-only"], env=env, check=True)
             prepare_cache(args, run_dir)
         subprocess.run(command, env=env, check=True)
         if not args.dry_run:

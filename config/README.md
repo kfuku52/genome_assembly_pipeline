@@ -245,6 +245,10 @@ curl -L "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id
 
 The parent runner prepares a private Compleasm cache for each child run and tests
 protein-mode startup in the pinned BRAKER4 container before annotation starts.
+It reuses the BRAKER3 image from the child Snakemake cache or installs it via
+Apptainer. Use `--compleasm-cache-seed PATH` with a completed private download
+to avoid downloading the same lineage again. The runner copies the seed,
+validates it against the configured BUSCO dataset, and runs the startup probe.
 The cache uses the configured BUSCO lineage and a catalog of fixed lineages.
 BRAKER4 passes the lineage explicitly, so the pinned downloader does not need
 the auto-lineage placement records it cannot parse. The runner checks the

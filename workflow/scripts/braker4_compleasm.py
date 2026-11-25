@@ -1,6 +1,8 @@
 """Prepare a run-private Compleasm cache and verify BRAKER4 rescue outputs."""
 
 import configparser
+import fcntl
+import gzip
 import hashlib
 import re
 import shutil
@@ -29,9 +31,22 @@ def container_command(args, run_dir):
     ini = configparser.ConfigParser()
     ini.read(args.template)
     uri = ini["containers"]["braker3_image"]
-    image = Path(args.container_cache) / (hashlib.md5(uri.encode()).hexdigest() + ".simg")
+    cache = Path(args.container_cache)
+    # Match the name used by the child Snakemake workflow.
+    image = cache / (hashlib.md5(uri.encode()).hexdigest() + ".simg")
     if not image.is_file():
-        raise FileNotFoundError(f"Run the BRAKER4 container download first: {image}")
+        cache.mkdir(parents=True, exist_ok=True)
+        with image.with_suffix(".pull.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if not image.exists():
+                with tempfile.TemporaryDirectory(dir=cache, prefix=".braker3-pull-") as tmp:
+                    staged = Path(tmp) / image.name
+                    subprocess.run(["apptainer", "pull", str(staged), uri], check=True, timeout=3600)
+                    if not staged.is_file() or not staged.stat().st_size:
+                        raise ValueError(f"Apptainer did not create the BRAKER3 image for {uri}")
+                    staged.rename(image)
+    if not image.is_file() or not image.stat().st_size:
+        raise ValueError(f"Invalid BRAKER3 image in cache: {image}")
     return ["apptainer", "exec", "--cleanenv", "--no-home", "--bind", f"{run_dir},{args.container_cache}",
             str(image), "python3"]
 
@@ -91,21 +106,45 @@ def download_cache(args, run_dir, command):
         return cache
     with tempfile.TemporaryDirectory(dir=run_dir, prefix=".compleasm-cache-") as tmp:
         staged = Path(tmp) / "library"
-        with urlopen(BUSCO_CATALOG_URL + ".hash", timeout=60) as response:
-            checksum = response.read().decode().split()[0]
-        with urlopen(BUSCO_CATALOG_URL, timeout=60) as response:
-            catalog = response.read()
-        write_fixed_lineage_catalog(staged, args.lineage, catalog, checksum)
-        with (Path(run_dir) / "compleasm_download.log").open("w") as log:
-            subprocess.run([*command, "/opt/compleasm_kit/compleasm.py", "download",
-                            args.lineage, "-L", str(staged)], check=True, stdout=log,
-                           stderr=subprocess.STDOUT, timeout=3600)
+        seed = getattr(args, "compleasm_cache_seed", None)
+        if seed is not None:
+            seed = Path(seed)
+            markers = {"file_versions.tsv.done", "placement_files.done",
+                       f"{args.lineage}.done", "eukaryota_odb12.done"}
+            if (not seed.is_dir() or Path(run_dir).resolve().is_relative_to(seed.resolve())
+                    or not all((seed / name).is_file() for name in markers)
+                    or any(path.is_symlink() or path.name.endswith(".tmp") for path in seed.rglob("*"))):
+                raise ValueError(f"Compleasm cache seed is incomplete or contains links: {seed}")
+            # Compleasm uses the extracted data once its download markers exist.
+            shutil.copytree(seed, staged, ignore=shutil.ignore_patterns("*.tar.gz"))
+        else:
+            with urlopen(BUSCO_CATALOG_URL + ".hash", timeout=60) as response:
+                checksum = response.read().decode().split()[0]
+            with urlopen(BUSCO_CATALOG_URL, timeout=60) as response:
+                catalog = response.read()
+            write_fixed_lineage_catalog(staged, args.lineage, catalog, checksum)
+            with (Path(run_dir) / "compleasm_download.log").open("w") as log:
+                subprocess.run([*command, "/opt/compleasm_kit/compleasm.py", "download",
+                                args.lineage, "-L", str(staged)], check=True, stdout=log,
+                               stderr=subprocess.STDOUT, timeout=3600)
         lineage = staged / args.lineage
         verify_lineage(source, lineage)
         if (source / "lengths_cutoff").is_file() and not (lineage / "lengths_cutoff").exists():
             shutil.copyfile(source / "lengths_cutoff", lineage / "lengths_cutoff")
         staged.rename(cache)
     return cache
+
+
+def write_probe(reference, probe):
+    with gzip.open(reference, "rt") as source, probe.open("w") as output:
+        header = next(source, "")
+        if not header.startswith(">"):
+            raise ValueError(f"Compleasm reference is not a FASTA: {reference}")
+        output.write(header)
+        for line in source:
+            if line.startswith(">"):
+                break
+            output.write(line)
 
 
 def prepare_cache(args, run_dir):
@@ -115,16 +154,7 @@ def prepare_cache(args, run_dir):
     # Exercise the same protein-mode startup used by best_by_compleasm.
     reference = cache / args.lineage / "refseq_db.faa.gz"
     probe = Path(run_dir) / "compleasm_preflight.faa"
-    extract = (
-        "import gzip,sys;"
-        "f=gzip.open(sys.argv[1],'rt');o=open(sys.argv[2],'w');"
-        "header=next(f);assert header.startswith('>');o.write(header);"
-        "\nfor line in f:\n"
-        " if line.startswith('>'): break\n"
-        " o.write(line)\n"
-        "o.close()"
-    )
-    subprocess.run([*command, "-c", extract, str(reference), str(probe)], check=True)
+    write_probe(reference, probe)
     with tempfile.TemporaryDirectory(dir=run_dir, prefix=".compleasm-probe-") as tmp:
         output = Path(tmp) / "results"
         with (Path(run_dir) / "compleasm_preflight.log").open("w") as log:
