@@ -30,6 +30,22 @@ def container_command(args, run_dir):
             str(image), "python3"]
 
 
+def verify_lineage(source, candidate):
+    paths = ["dataset.cfg", "scores_cutoff", "refseq_db.faa.gz"]
+    paths.extend(str(path.relative_to(source)) for path in sorted((source / "hmms").glob("*.hmm")))
+    if len(paths) == 3:
+        raise ValueError(f"No BUSCO HMM profiles found in {source}")
+    for name in paths:
+        def digest(path):
+            value = hashlib.sha256()
+            with path.open("rb") as handle:
+                for block in iter(lambda: handle.read(1024 * 1024), b""):
+                    value.update(block)
+            return value.hexdigest()
+        if digest(source / name) != digest(candidate / name):
+            raise ValueError(f"Compleasm lineage differs from the selected BUSCO dataset: {name}")
+
+
 def prepare_cache(args, run_dir):
     """Use the pinned container's unmodified downloader before admitting a run."""
     cache = private_cache(run_dir)
@@ -41,6 +57,7 @@ def prepare_cache(args, run_dir):
         subprocess.run([*command, "/opt/compleasm_kit/compleasm.py", "download",
                         args.lineage, "-L", str(cache)],
                        check=True, stdout=log, stderr=subprocess.STDOUT, timeout=3600)
+    verify_lineage(Path(args.busco_downloads) / "lineages" / args.lineage, cache / args.lineage)
     # Exercise the same protein-mode startup used by best_by_compleasm.
     reference = cache / args.lineage / "refseq_db.faa.gz"
     probe = Path(run_dir) / "compleasm_preflight.faa"
