@@ -350,6 +350,31 @@ class Braker4Test(unittest.TestCase):
         self.assertEqual(rows, (cache / "file_versions.tsv").read_text().splitlines())
         self.assertEqual(catalog, (cache / "file_versions.upstream.tsv").read_bytes())
 
+    def test_compleasm_publishes_and_reuses_odb12_cache_without_length_cutoffs(self):
+        source = self.args.busco_downloads / "lineages" / self.args.lineage
+        (source / "hmms").mkdir()
+        entries = ("scores_cutoff", "refseq_db.faa.gz", "hmms/test.hmm")
+        for name in entries:
+            (source / name).write_text(name)
+        catalog = "".join(
+            f"{name}\t2026-05-22\t{'a' * 32}\tEukaryota\tlineages\n"
+            for name in (self.args.lineage, "eukaryota_odb12")
+        ).encode()
+        checksum = hashlib.md5(catalog).hexdigest().encode()
+
+        def download(command, **kwargs):
+            lineage = Path(command[-1]) / self.args.lineage
+            (lineage / "hmms").mkdir(parents=True)
+            for name in entries:
+                (lineage / name).write_text(name)
+
+        with mock.patch.object(braker4_compleasm, "urlopen", side_effect=[io.BytesIO(checksum), io.BytesIO(catalog)]):
+            with mock.patch.object(braker4_compleasm.subprocess, "run", side_effect=download) as runner:
+                cache = braker4_compleasm.download_cache(self.args, self.root, ["apptainer"])
+                self.assertEqual(cache, braker4_compleasm.download_cache(self.args, self.root, ["apptainer"]))
+                self.assertEqual(1, runner.call_count)
+        self.assertFalse((cache / self.args.lineage / "lengths_cutoff").exists())
+
     def test_placeholder_compleasm_summary_is_not_accepted(self):
         path = self.root / "summary.txt"
         path.write_text("Compleasm assessment failed\n")

@@ -47,7 +47,7 @@ def verify_lineage(source, candidate):
         raise ValueError(f"Compleasm and BUSCO HMM profile inventories differ: {candidate}")
     paths = ["scores_cutoff", "refseq_db.faa.gz", *(f"hmms/{name}" for name in sorted(profiles))]
     # The pinned Compleasm downloader only extracts the reference proteins,
-    # HMMs and score cutoffs. BRAKER4 separately reads lengths_cutoff.
+    # HMMs and score cutoffs. BRAKER4 accepts odb12 datasets without lengths.
     if (candidate / "lengths_cutoff").exists():
         paths.append("lengths_cutoff")
     for name in paths:
@@ -88,8 +88,6 @@ def download_cache(args, run_dir, command):
         if list(cache.glob("*.tmp")):
             raise ValueError(f"Incomplete Compleasm download requires review: {cache}")
         verify_lineage(source, cache / args.lineage)
-        if not (cache / args.lineage / "lengths_cutoff").is_file():
-            raise FileNotFoundError(f"BRAKER4 lengths_cutoff is missing from {cache}")
         return cache
     with tempfile.TemporaryDirectory(dir=run_dir, prefix=".compleasm-cache-") as tmp:
         staged = Path(tmp) / "library"
@@ -104,7 +102,7 @@ def download_cache(args, run_dir, command):
                            stderr=subprocess.STDOUT, timeout=3600)
         lineage = staged / args.lineage
         verify_lineage(source, lineage)
-        if not (lineage / "lengths_cutoff").exists():
+        if (source / "lengths_cutoff").is_file() and not (lineage / "lengths_cutoff").exists():
             shutil.copyfile(source / "lengths_cutoff", lineage / "lengths_cutoff")
         staged.rename(cache)
     return cache
