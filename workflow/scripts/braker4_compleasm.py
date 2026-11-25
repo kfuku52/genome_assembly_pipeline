@@ -3,7 +3,9 @@
 import configparser
 import hashlib
 import re
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 
@@ -30,34 +32,53 @@ def container_command(args, run_dir):
             str(image), "python3"]
 
 
+def digest(path):
+    with path.open("rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
 def verify_lineage(source, candidate):
-    paths = ["dataset.cfg", "scores_cutoff", "refseq_db.faa.gz"]
-    paths.extend(str(path.relative_to(source)) for path in sorted((source / "hmms").glob("*.hmm")))
-    if len(paths) == 3:
-        raise ValueError(f"No BUSCO HMM profiles found in {source}")
+    profiles = {p.name for p in (source / "hmms").glob("*.hmm")}
+    if not profiles or profiles != {p.name for p in (candidate / "hmms").iterdir()}:
+        raise ValueError(f"Compleasm and BUSCO HMM profile inventories differ: {candidate}")
+    paths = ["scores_cutoff", "refseq_db.faa.gz", *(f"hmms/{name}" for name in sorted(profiles))]
+    # The pinned Compleasm downloader only extracts the reference proteins,
+    # HMMs and score cutoffs. BRAKER4 separately reads lengths_cutoff.
+    if (candidate / "lengths_cutoff").exists():
+        paths.append("lengths_cutoff")
     for name in paths:
-        def digest(path):
-            value = hashlib.sha256()
-            with path.open("rb") as handle:
-                for block in iter(lambda: handle.read(1024 * 1024), b""):
-                    value.update(block)
-            return value.hexdigest()
         if digest(source / name) != digest(candidate / name):
             raise ValueError(f"Compleasm lineage differs from the selected BUSCO dataset: {name}")
 
 
+def download_cache(args, run_dir, command):
+    cache = private_cache(run_dir)
+    source = Path(args.busco_downloads) / "lineages" / args.lineage
+    if cache.exists():
+        if list(cache.glob("*.tmp")):
+            raise ValueError(f"Incomplete Compleasm download requires review: {cache}")
+        verify_lineage(source, cache / args.lineage)
+        if not (cache / args.lineage / "lengths_cutoff").is_file():
+            raise FileNotFoundError(f"BRAKER4 lengths_cutoff is missing from {cache}")
+        return cache
+    with tempfile.TemporaryDirectory(dir=run_dir, prefix=".compleasm-cache-") as tmp:
+        staged = Path(tmp) / "library"
+        with (Path(run_dir) / "compleasm_download.log").open("w") as log:
+            subprocess.run([*command, "/opt/compleasm_kit/compleasm.py", "download",
+                            args.lineage, "-L", str(staged)], check=True, stdout=log,
+                           stderr=subprocess.STDOUT, timeout=3600)
+        lineage = staged / args.lineage
+        verify_lineage(source, lineage)
+        if not (lineage / "lengths_cutoff").exists():
+            shutil.copyfile(source / "lengths_cutoff", lineage / "lengths_cutoff")
+        staged.rename(cache)
+    return cache
+
+
 def prepare_cache(args, run_dir):
     """Use the pinned container's unmodified downloader before admitting a run."""
-    cache = private_cache(run_dir)
-    cache.mkdir(exist_ok=True)
-    if list(cache.glob("*.tmp")):
-        raise ValueError(f"Incomplete Compleasm download requires review: {cache}")
     command = container_command(args, run_dir)
-    with (Path(run_dir) / "compleasm_download.log").open("w") as log:
-        subprocess.run([*command, "/opt/compleasm_kit/compleasm.py", "download",
-                        args.lineage, "-L", str(cache)],
-                       check=True, stdout=log, stderr=subprocess.STDOUT, timeout=3600)
-    verify_lineage(Path(args.busco_downloads) / "lineages" / args.lineage, cache / args.lineage)
+    cache = download_cache(args, run_dir, command)
     # Exercise the same protein-mode startup used by best_by_compleasm.
     reference = cache / args.lineage / "refseq_db.faa.gz"
     probe = Path(run_dir) / "compleasm_preflight.faa"
@@ -71,16 +92,14 @@ def prepare_cache(args, run_dir):
         "o.close()"
     )
     subprocess.run([*command, "-c", extract, str(reference), str(probe)], check=True)
-    output = Path(run_dir) / "compleasm_preflight"
-    with (Path(run_dir) / "compleasm_preflight.log").open("w") as log:
-        subprocess.run([*command, "/opt/compleasm_kit/compleasm.py", "protein",
-                        "-p", str(probe), "-l", args.lineage, "-L", str(cache),
-                        "-o", str(output), "-t", "1"],
-                       check=True, stdout=log, stderr=subprocess.STDOUT, timeout=600)
-    summaries = list(output.rglob("summary.txt"))
-    if len(summaries) != 1:
-        raise ValueError("Compleasm protein preflight did not produce one summary")
-    complete_summary(summaries[0])
+    with tempfile.TemporaryDirectory(dir=run_dir, prefix=".compleasm-probe-") as tmp:
+        output = Path(tmp) / "results"
+        with (Path(run_dir) / "compleasm_preflight.log").open("w") as log:
+            subprocess.run([*command, "/opt/compleasm_kit/compleasm.py", "protein",
+                            "-p", str(probe), "-l", args.lineage, "-L", str(cache),
+                            "-o", str(output), "-t", "1"],
+                           check=True, stdout=log, stderr=subprocess.STDOUT, timeout=600)
+        complete_summary(output / "summary.txt")
 
 
 def validate_rescue(run_dir, sample):

@@ -321,6 +321,21 @@ class Braker4Test(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Missing Compleasm rescue"):
             braker4_compleasm.validate_rescue(run, self.args.sample)
 
+    def test_compleasm_checks_the_files_extracted_by_the_pinned_downloader(self):
+        source = self.root / "lineage"
+        candidate = self.root / "private"
+        for directory in (source, candidate):
+            (directory / "hmms").mkdir(parents=True)
+            for name in ("scores_cutoff", "refseq_db.faa.gz", "hmms/test.hmm"):
+                (directory / name).write_text(name)
+        (source / "dataset.cfg").write_text("name=fixture\n")
+        (source / "lengths_cutoff").write_text("test\t100\n")
+
+        braker4_compleasm.verify_lineage(source, candidate)
+        (candidate / "scores_cutoff").write_text("changed")
+        with self.assertRaisesRegex(ValueError, "scores_cutoff"):
+            braker4_compleasm.verify_lineage(source, candidate)
+
     def test_placeholder_compleasm_summary_is_not_accepted(self):
         path = self.root / "summary.txt"
         path.write_text("Compleasm assessment failed\n")
