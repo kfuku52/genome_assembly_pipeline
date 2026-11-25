@@ -7,6 +7,10 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from urllib.request import urlopen
+
+
+BUSCO_CATALOG_URL = "https://busco-data.ezlab.org/v5/data/file_versions.tsv"
 
 
 def complete_summary(path):
@@ -51,6 +55,32 @@ def verify_lineage(source, candidate):
             raise ValueError(f"Compleasm lineage differs from the selected BUSCO dataset: {name}")
 
 
+def write_fixed_lineage_catalog(cache, lineage, catalog, checksum):
+    if hashlib.md5(catalog).hexdigest() != checksum:
+        raise ValueError("BUSCO catalog checksum does not match")
+    required = {lineage, "eukaryota_odb12"}
+    rows = {}
+    for line in catalog.decode().splitlines():
+        name, date, md5, _, kind = line.split()
+        if kind == "lineages" and name in required:
+            if name in rows or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) or not re.fullmatch(r"[a-f0-9]{32}", md5):
+                raise ValueError(f"Invalid BUSCO catalog entry for {name}")
+            rows[name] = line
+    if rows.keys() != required:
+        raise ValueError("Fixed lineages are missing from the BUSCO catalog")
+
+    # BRAKER4 names an explicit lineage in all Compleasm calls. The pinned
+    # downloader cannot parse newer auto-lineage placement IDs (e.g. odb12.2).
+    # Install a private catalog with only the fixed lineage datasets it uses.
+    data = ("\n".join(rows.values()) + "\n").encode()
+    cache.mkdir()
+    (cache / "file_versions.upstream.tsv").write_bytes(catalog)
+    (cache / "file_versions.upstream.tsv.hash").write_text(checksum + "\n")
+    (cache / "file_versions.tsv").write_bytes(data)
+    (cache / "file_versions.tsv.hash").write_text(hashlib.md5(data).hexdigest() + "  file_versions.tsv\n")
+    (cache / "file_versions.tsv.done").touch()
+
+
 def download_cache(args, run_dir, command):
     cache = private_cache(run_dir)
     source = Path(args.busco_downloads) / "lineages" / args.lineage
@@ -63,6 +93,11 @@ def download_cache(args, run_dir, command):
         return cache
     with tempfile.TemporaryDirectory(dir=run_dir, prefix=".compleasm-cache-") as tmp:
         staged = Path(tmp) / "library"
+        with urlopen(BUSCO_CATALOG_URL + ".hash", timeout=60) as response:
+            checksum = response.read().decode().split()[0]
+        with urlopen(BUSCO_CATALOG_URL, timeout=60) as response:
+            catalog = response.read()
+        write_fixed_lineage_catalog(staged, args.lineage, catalog, checksum)
         with (Path(run_dir) / "compleasm_download.log").open("w") as log:
             subprocess.run([*command, "/opt/compleasm_kit/compleasm.py", "download",
                             args.lineage, "-L", str(staged)], check=True, stdout=log,

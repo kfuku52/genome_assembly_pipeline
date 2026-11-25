@@ -245,6 +245,11 @@ curl -L "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id
 
 The parent runner prepares a private Compleasm cache for each child run and tests
 protein-mode startup in the pinned BRAKER4 container before annotation starts.
+The cache uses the configured BUSCO lineage and a catalog of fixed lineages.
+BRAKER4 passes the lineage explicitly, so the pinned downloader does not need
+the auto-lineage placement records it cannot parse. The runner checks the
+downloaded profiles against the configured BUSCO dataset before publishing the
+cache.
 Exports require successful Compleasm evaluations for all three rescue candidates
 and the final protein set. A failed candidate comparison raises an error even
 when BRAKER4 reports that the original prediction was best.

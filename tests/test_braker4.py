@@ -2,6 +2,7 @@ import argparse
 import configparser
 import csv
 import gzip
+import hashlib
 import io
 import json
 import os
@@ -335,6 +336,19 @@ class Braker4Test(unittest.TestCase):
         (candidate / "scores_cutoff").write_text("changed")
         with self.assertRaisesRegex(ValueError, "scores_cutoff"):
             braker4_compleasm.verify_lineage(source, candidate)
+
+    def test_compleasm_fixed_lineage_catalog_omits_new_placement_names(self):
+        md5 = "a" * 32
+        lineages = ["eukaryota_odb12", "embryophyta_odb12"]
+        rows = [f"{name}\t2026-05-22\t{md5}\tEukaryota\tlineages" for name in lineages]
+        placement = f"list_of_reference_markers.eukaryota_odb12.2.txt\t2026-05-22\t{md5}\tEukaryota\tplacement_files"
+        catalog = ("\n".join([*rows, placement]) + "\n").encode()
+        cache = self.root / "cache"
+        with self.assertRaisesRegex(ValueError, "checksum"):
+            braker4_compleasm.write_fixed_lineage_catalog(cache, lineages[1], catalog, md5)
+        braker4_compleasm.write_fixed_lineage_catalog(cache, lineages[1], catalog, hashlib.md5(catalog).hexdigest())
+        self.assertEqual(rows, (cache / "file_versions.tsv").read_text().splitlines())
+        self.assertEqual(catalog, (cache / "file_versions.upstream.tsv").read_bytes())
 
     def test_placeholder_compleasm_summary_is_not_accepted(self):
         path = self.root / "summary.txt"
