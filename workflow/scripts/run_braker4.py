@@ -375,17 +375,24 @@ def main():
     if args.export_completed_run is not None:
         export_completed_run(args)
         return
-    run_dir, identity, command, env = prepare_run(args)
-    print(f"BRAKER4 work directory: {run_dir}", flush=True)
-    print(shlex.join(command), flush=True)
+    identity, _, _ = identify_run(args)
+    run_dir = (checked_path(args.resume_postprocessing_run) if args.resume_postprocessing_run
+               else checked_path(args.output_dir) / "work" / run_name(identity))
+    run_dir.mkdir(parents=True, exist_ok=True)
     with (run_dir / ".parent-run.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        run_dir, identity, command, env = prepare_run(args)
+        print(f"BRAKER4 work directory: {run_dir}", flush=True)
+        print(shlex.join(command), flush=True)
         if not args.dry_run:
             if args.resume_postprocessing_run:
                 collected = run_dir / "output" / args.sample / "results"
                 backup = run_dir / "results_before_compleasm_recovery"
                 if not backup.exists():
-                    shutil.copytree(collected, backup)
+                    with tempfile.TemporaryDirectory(dir=run_dir) as directory:
+                        staged = Path(directory) / "results"
+                        shutil.copytree(collected, staged)
+                        staged.rename(backup)
             subprocess.run([*command, "--container-download-only"], env=env, check=True)
             prepare_cache(args, run_dir)
         subprocess.run(command, env=env, check=True)
@@ -394,6 +401,7 @@ def main():
             ini.read(args.template)
             if ini.getboolean("PARAMS", "run_best_by_compleasm", fallback=True):
                 identity["compleasm_rescue"] = validate_rescue(run_dir, args.sample)
+            Path(args.output_dir).mkdir(parents=True, exist_ok=True)
             export_results(run_dir, args.output_dir, args.sample, identity, command)
 
 

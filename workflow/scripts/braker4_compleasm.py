@@ -26,7 +26,7 @@ def container_command(args, run_dir):
     image = Path(args.container_cache) / (hashlib.md5(uri.encode()).hexdigest() + ".simg")
     if not image.is_file():
         raise FileNotFoundError(f"Run the BRAKER4 container download first: {image}")
-    return ["apptainer", "exec", "--bind", f"{run_dir},{args.container_cache}",
+    return ["apptainer", "exec", "--cleanenv", "--no-home", "--bind", f"{run_dir},{args.container_cache}",
             str(image), "python3"]
 
 
