@@ -240,3 +240,19 @@ curl -L "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id
 curl -L "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=${MITOCHONDRION_ACCESSION}&rettype=gb&retmode=text" \
   -o "mitochondrial_reference/${MITOCHONDRION_ACCESSION}.gbk"
 ```
+
+### BRAKER4 Compleasm recovery
+
+The parent runner prepares a private Compleasm cache for each child run and tests
+protein-mode startup in the pinned BRAKER4 container before annotation starts.
+Exports require successful Compleasm evaluations for all three rescue candidates
+and the final protein set. A failed candidate comparison raises an error even
+when BRAKER4 reports that the original prediction was best.
+
+For an existing run with the same input files and scientific configuration,
+pass `--resume-postprocessing-run PATH` to `workflow/scripts/run_braker4.py`,
+together with the original input arguments. The runner validates recorded input
+identities, retains the earlier collected results, and reruns
+`best_by_compleasm` and its downstream consumers. Existing RNA-seq alignments,
+training and predictor outputs are reused. Use a separate `--output-dir` to
+retain the previously exported annotation while reviewing the candidate.

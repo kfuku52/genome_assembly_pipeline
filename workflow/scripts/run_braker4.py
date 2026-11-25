@@ -7,6 +7,7 @@ Snakemake directory() output: parent-job retries must not delete its checkpoints
 import argparse
 import configparser
 import csv
+import fcntl
 import gzip
 import hashlib
 import io
@@ -20,6 +21,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from braker4_compleasm import prepare_cache, private_cache, validate_rescue
 from filter_gff_by_fasta_ids import iter_gff_records, parse_attributes, split_parents
 
 
@@ -102,7 +104,18 @@ def prepare_run(args):
     identity, source, busco = identify_run(args)
     # A changed input set or model configuration gets a fresh run, while retries
     # with the same inputs reuse all child metadata. Resource changes can resume.
-    run_dir = checked_path(args.output_dir) / "work" / run_name(identity)
+    resume = getattr(args, "resume_postprocessing_run", None)
+    run_dir = checked_path(resume) if resume else checked_path(args.output_dir) / "work" / run_name(identity)
+    if resume:
+        previous = json.loads((run_dir / "inputs.json").read_text())
+        previous_runner = previous.get("runner_sha256", "")
+        if (not re.fullmatch(r"[a-f0-9]{64}", previous_runner)
+                or run_dir.name != run_name(previous)
+                or previous != {**identity, "runner_sha256": previous_runner}):
+            raise ValueError("BRAKER4 postprocessing run does not match current inputs and configuration")
+        for name in ("genome.fa", "augustus.hints.fixed.gtf",
+                     "GeneMark-ETP/genemark.gtf", "braker.tsebra.raw.gtf"):
+            file_identity(run_dir / "output" / args.sample / name)
     run_dir.mkdir(parents=True, exist_ok=True)
     inputs_dir = run_dir / "inputs"
     inputs_dir.mkdir(exist_ok=True)
@@ -133,7 +146,7 @@ def prepare_run(args):
         "samples_file": str(run_dir / "samples.csv"),
         "augustus_config_path": str(run_dir / "augustus_config"),
         "busco_download_path": str(busco),
-        "compleasm_download_path": str(busco / "lineages"),
+        "compleasm_download_path": str(private_cache(run_dir)),
     }
     ini["SLURM_ARGS"] = {
         "cpus_per_task": str(args.threads), "mem_of_node": str(args.mem_mb),
@@ -142,7 +155,8 @@ def prepare_run(args):
     ini_text = io.StringIO()
     ini.write(ini_text)
     write_if_changed(run_dir / "config.ini", ini_text.getvalue())
-    write_if_changed(run_dir / "inputs.json", json.dumps(identity, indent=2) + "\n")
+    if not resume:
+        write_if_changed(run_dir / "inputs.json", json.dumps(identity, indent=2) + "\n")
 
     cache = checked_path(args.container_cache)
     cache.mkdir(parents=True, exist_ok=True)
@@ -161,6 +175,10 @@ def prepare_run(args):
         "--singularity-args", shlex.join(["--bind", ",".join(sorted(bind_paths))]),
         "--rerun-incomplete", "--latency-wait", "60", "--printshellcmds", "all",
     ]
+    if resume:
+        # Explicitly rerun rescue and downstream consumers without changing the
+        # completed alignment or training metadata.
+        command.extend(["--rerun-triggers", "mtime", "--forcerun", "best_by_compleasm"])
     if args.dry_run:
         command.append("--dry-run")
     collected = run_dir / "output" / args.sample / "results"
@@ -319,6 +337,10 @@ def export_completed_run(args):
         or previous != {**identity, "runner_sha256": runner_sha256}
     ):
         raise ValueError("Completed BRAKER4 run does not match the current inputs and configuration")
+    ini = configparser.ConfigParser()
+    ini.read(args.template)
+    if ini.getboolean("PARAMS", "run_best_by_compleasm", fallback=True):
+        validate_rescue(run_dir, args.sample)
     export_results(
         run_dir, output_dir, args.sample,
         {**previous, "exporter_sha256": identity["runner_sha256"]}, [],
@@ -341,6 +363,10 @@ def main():
     parser.add_argument("--mem-mb", type=int, required=True)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--resume-postprocessing-run", type=Path,
+        help="Reuse matching saved predictors and rerun Compleasm rescue and downstream steps.",
+    )
     mode.add_argument(
         "--export-completed-run", type=Path,
         help="Validate and export a matching finished BRAKER4 work directory without rerunning prediction.",
@@ -352,9 +378,23 @@ def main():
     run_dir, identity, command, env = prepare_run(args)
     print(f"BRAKER4 work directory: {run_dir}", flush=True)
     print(shlex.join(command), flush=True)
-    subprocess.run(command, env=env, check=True)
-    if not args.dry_run:
-        export_results(run_dir, args.output_dir, args.sample, identity, command)
+    with (run_dir / ".parent-run.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if not args.dry_run:
+            if args.resume_postprocessing_run:
+                collected = run_dir / "output" / args.sample / "results"
+                backup = run_dir / "results_before_compleasm_recovery"
+                if not backup.exists():
+                    shutil.copytree(collected, backup)
+            subprocess.run([*command, "--container-download-only"], env=env, check=True)
+            prepare_cache(args, run_dir)
+        subprocess.run(command, env=env, check=True)
+        if not args.dry_run:
+            ini = configparser.ConfigParser()
+            ini.read(args.template)
+            if ini.getboolean("PARAMS", "run_best_by_compleasm", fallback=True):
+                identity["compleasm_rescue"] = validate_rescue(run_dir, args.sample)
+            export_results(run_dir, args.output_dir, args.sample, identity, command)
 
 
 if __name__ == "__main__":

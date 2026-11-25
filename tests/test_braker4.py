@@ -20,6 +20,7 @@ import download_braker4
 import filter_gff_by_fasta_ids
 import rename_submission_gene_models
 import run_braker4
+import braker4_compleasm
 import select_longest_cds
 
 
@@ -83,6 +84,16 @@ class Braker4Test(unittest.TestCase):
             with gzip.open(results / (name + ".gz"), "wt") as handle:
                 handle.write(contents)
         (results / ".done").touch()
+        sample_dir = results.parent
+        (sample_dir / "best_by_compleasm.log").write_text("Completed all three comparisons.\n")
+        summary = "S:90.0%\nD:1.0%\nF:2.0%\nM:7.0%\n"
+        for name in ("genemark", "augustus", "braker"):
+            directory = sample_dir / "best_by_compleasm_tmp/single" / name
+            directory.mkdir(parents=True)
+            (directory / "summary.txt").write_text(summary)
+        directory = sample_dir / "compleasm_proteins"
+        directory.mkdir()
+        (directory / "summary.txt").write_text(summary)
         return results
 
     def test_etp_configuration_and_unique_library_aliases(self):
@@ -272,6 +283,49 @@ class Braker4Test(unittest.TestCase):
         resumed, _, command, _ = run_braker4.prepare_run(self.args)
         self.assertEqual(run, resumed)
         self.assertEqual("collect_results", command[command.index("--forcerun") + 1])
+
+    def test_private_compleasm_cache_and_explicit_postprocessing_resume(self):
+        run, previous, _, _ = run_braker4.prepare_run(self.args)
+        sample_dir = run / "output" / self.args.sample
+        sample_dir.mkdir(parents=True)
+        for name in ("genome.fa", "augustus.hints.fixed.gtf",
+                     "GeneMark-ETP/genemark.gtf", "braker.tsebra.raw.gtf"):
+            path = sample_dir / name
+            path.parent.mkdir(exist_ok=True)
+            path.write_text("saved predictor output\n")
+        ini = configparser.ConfigParser()
+        ini.read(run / "config.ini")
+        self.assertEqual(str(run / "compleasm_downloads"), ini["paths"]["compleasm_download_path"])
+        self.args.resume_postprocessing_run = run
+        self.args.output_dir = self.root / "candidate"
+        resumed, _, command, _ = run_braker4.prepare_run(self.args)
+        self.assertEqual(run, resumed)
+        self.assertEqual(previous, json.loads((run / "inputs.json").read_text()))
+        self.assertEqual("best_by_compleasm", command[command.index("--forcerun") + 1])
+        self.args.genome.write_text(">chr1\nCHANGED\n")
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            run_braker4.prepare_run(self.args)
+
+    def test_suppressed_rescue_error_and_missing_comparisons_are_rejected(self):
+        run, _, _, _ = run_braker4.prepare_run(self.args)
+        result = self.outputs(run)
+        self.assertEqual(3, len(braker4_compleasm.validate_rescue(run, self.args.sample)))
+        log = result.parent / "best_by_compleasm.log"
+        log.write_text("Return code of subprocess was 1\noriginal was already best\n")
+        with self.assertRaisesRegex(ValueError, "best_by_compleasm failed"):
+            braker4_compleasm.validate_rescue(run, self.args.sample)
+        log.write_text("original was already best; no better.gtf\n")
+        braker4_compleasm.validate_rescue(run, self.args.sample)
+        missing = result.parent / "best_by_compleasm_tmp/single/augustus/summary.txt"
+        missing.unlink()
+        with self.assertRaisesRegex(ValueError, "Missing Compleasm rescue"):
+            braker4_compleasm.validate_rescue(run, self.args.sample)
+
+    def test_placeholder_compleasm_summary_is_not_accepted(self):
+        path = self.root / "summary.txt"
+        path.write_text("Compleasm assessment failed\n")
+        with self.assertRaisesRegex(ValueError, "Incomplete Compleasm"):
+            braker4_compleasm.complete_summary(path)
 
     def test_longest_cds_ties_use_input_order(self):
         cds, gff, output = (self.root / name for name in ("cds.fa", "gene.gff3", "longest.fa"))
