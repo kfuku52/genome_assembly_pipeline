@@ -51,6 +51,11 @@ def container_command(args, run_dir):
             str(image), "python3"]
 
 
+def digest(path):
+    with path.open("rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
 def verify_lineage(source, candidate):
     profiles = {p.name for p in (source / "hmms").glob("*.hmm")}
     if not profiles or profiles != {p.name for p in (candidate / "hmms").iterdir()}:
@@ -61,13 +66,8 @@ def verify_lineage(source, candidate):
     if (candidate / "lengths_cutoff").exists():
         paths.append("lengths_cutoff")
     for name in paths:
-        with (source / name).open("rb") as expected, (candidate / name).open("rb") as actual:
-            while True:
-                block = expected.read(128 * 1024)
-                if block != actual.read(128 * 1024):
-                    raise ValueError(f"Compleasm lineage differs from the selected BUSCO dataset: {name}")
-                if not block:
-                    break
+        if digest(source / name) != digest(candidate / name):
+            raise ValueError(f"Compleasm lineage differs from the selected BUSCO dataset: {name}")
 
 
 def write_fixed_lineage_catalog(cache, lineage, catalog, checksum):
