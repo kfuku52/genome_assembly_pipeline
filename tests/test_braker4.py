@@ -337,6 +337,13 @@ class Braker4Test(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "scores_cutoff"):
             braker4_compleasm.verify_lineage(source, candidate)
 
+        (candidate / "scores_cutoff").write_text("scores_cutoff")
+        reference = b"A" * (128 * 1024)
+        (source / "refseq_db.faa.gz").write_bytes(reference)
+        (candidate / "refseq_db.faa.gz").write_bytes(reference + b"B")
+        with self.assertRaisesRegex(ValueError, "refseq_db.faa.gz"):
+            braker4_compleasm.verify_lineage(source, candidate)
+
     def test_compleasm_fixed_lineage_catalog_omits_new_placement_names(self):
         md5 = "a" * 32
         lineages = ["eukaryota_odb12", "embryophyta_odb12"]
